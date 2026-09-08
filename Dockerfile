@@ -1,18 +1,50 @@
-FROM centos:7
+ARG DRAGEN_VERSION="4.5.4"
+ARG RUNFILE="dragen-${DRAGEN_VERSION}-12.multi.el8.x86_64.run"
 
-RUN yum install unzip wget -y
+# ==========================================
+# Build DRAGEN from Oracle Linux 8 RPM
+# ==========================================
+FROM oraclelinux:8 AS builder
+ARG DRAGEN_VERSION
+ARG RUNFILE
 
-RUN yum install epel-release -y
-RUN yum install R -y
-RUN yum install parallel sysvinit-tools gdb rsync smartmontools sos time -y 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# /bin/sh dragen-4.0.3-8.el7.x86_64.run 
-# returns an error, so use ; instead of &&
-# Also note the entire set of commands needs to return 0
-# else the Docker build will fail,
-# so make sure to keep the rm -rf /dragen_software command 
-# or some other command returning 0
-RUN wget -O dragen-4.0.3-8.el7.x86_64.run 'https://webdata.illumina.com/downloads/software/dragen/dragen-4.0.3-8.el7.x86_64.run' && \
-  /bin/sh dragen-4.0.3-8.el7.x86_64.run; \
-  rm -rf dragen-4.0.3-8.el7.x86_64.run && \
-  rm -rf /dragen_software
+RUN yum -y install cpio && yum clean all
+
+COPY "${RUNFILE}" /tmp/dragen.run
+
+# Build DRAGEN from the RPM
+RUN mkdir -p /tmp/dragen_extract /target_root \
+    && /bin/sh /tmp/dragen.run --noexec --target /tmp/dragen_extract \
+    && for rpm in /tmp/dragen_extract/*.rpm; do \
+           rpm2cpio "$rpm" | (cd /target_root/ && cpio -idmv); \
+       done
+
+# ==========================================
+# Runtime Build
+# ==========================================
+FROM oraclelinux:8
+ARG DRAGEN_VERSION
+
+ENV PATH="/opt/dragen/${DRAGEN_VERSION}/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+ENV LD_LIBRARY_PATH="/usr/lib64:/opt/dragen/${DRAGEN_VERSION}/lib"
+
+RUN yum -y install --nodocs oracle-epel-release-el8 \
+    && yum -y install --nodocs which bc perl rsync time udev systemd-libs \
+    && yum -y install --nodocs --enablerepo=ol8_codeready_builder R-core \
+    && yum clean all \
+    && rm -rf /var/cache/yum /usr/share/doc /usr/share/man
+
+COPY --from=builder /target_root/opt/dragen /opt/dragen
+COPY --from=builder /target_root/opt/bitstream /opt/bitstream
+COPY --from=builder /target_root/usr/lib64/ /usr/lib64/
+COPY --from=builder /target_root/etc/ /etc/
+
+RUN ldconfig \
+    && test -x /opt/dragen/${DRAGEN_VERSION}/bin/dragen
+
+# Mount point for sequencing data and outputs.
+WORKDIR /data
+
+CMD ["dragen", "--help"]
